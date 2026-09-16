@@ -59,6 +59,29 @@ To verify the bridge is not tuned to one policy, it was also run with `lerobot/v
 MODEL=/root/vqbet_pusht_migrated bash scripts/09-bridge-run.sh 1000
 ```
 
+## Chunked execution (`action_chunk_size > 1`)
+
+Chunking policies (diffusion, VQ-BeT) internally plan `n_action_steps` actions per denoising pass but the classic bridge still ships **one observation per step** — 7 of every 8 round-trips only pop an already-computed action from the policy's queue. With `action_chunk_size=8` the protocol turns chunk-native instead: the env requests observations **only when its action FIFO runs dry**, and the policy answers each request with a burst of 8 actions (one denoising pass, whole queue shipped). On the 10-seed PNG benchmark:
+
+| Mode | Success | Mean max coverage | Mean wall | Obs round-trips/episode |
+|---|---|---|---|---|
+| Step-by-step (`chunk=1`), PNG | 7/10 | 0.989 | 78.7 s | ~272 |
+| **Chunk-8 burst (PNG)** | **5/10** | **0.919** | **81.0 s** | **29.8 (÷9)** |
+| Direct in-process chunk-8 (no ROS, reference) | 2/10 | 0.81 | — | 0 |
+
+Reading the numbers:
+
+- **Round-trips drop 9× at unchanged wall time** — the denoising pass dominates wall time on this link, and bursts remove nearly all of the per-message overhead around it. On a bandwidth-limited or jittery link (real robot over Wi-Fi) this is the difference between a control loop that stalls and one that never waits.
+- **The success cost is chunking's own feedback latency, not the bridge**: every episode's actions k..k+7 are planned from one observation, so the policy corrects 8× less often. The failure signature is characteristic — three of the five failures peak above 0.96 coverage but cannot *hold* it to the end, exactly the open-loop degradation that motivates re-conditioning schemes like Real-Time Chunking. The bridge matches the direct in-process chunk-8 baseline within sampling variance, so the transport adds nothing on top.
+- Two conditions must hold for the burst to work at all, both learned the hard way:
+  1. **The policy's observation-history queue must be reset at each burst.** Without the intermediate observations, the queue at re-inference holds `[obs_{t-8}, obs_t]` instead of `[obs_{t-1}, obs_t]`, and diffusion_pusht collapses to near-zero coverage (1.0 → 0.02 on seeds it otherwise solves). Resetting re-fills the history with the current observation duplicated — `[obs_t, obs_t]` — the same well-conditioned pattern the policy sees at episode start; quality returns to step-mode level. Done automatically when `action_chunk_size > 1`.
+  2. **Heartbeat duplicates must be deduplicated, and DDS history must fit the burst.** The env re-publishes an unanswered observation every 2 s; in step mode a queued duplicate just pops one more action (benign), but each queued duplicate triggering a full burst seeds the episode with overlapping re-sampled chunks (near-zero coverage again). The policy node fingerprints consecutive observations and answers each distinct one once. Burst publishing also needs DDS depth ≥ burst size (32 here) — a shallow history silently drops the tail of a burst mid-chunk.
+
+```bash
+CHUNK=8 CODEC=png bash scripts/09-bridge-run.sh 1000     # one episode
+bash scripts/15-chunk-bench.sh                           # 10-episode benchmark
+```
+
 ## Nodes & parameters
 
 | Node | Topic | Type | Dir |
@@ -71,7 +94,7 @@ MODEL=/root/vqbet_pusht_migrated bash scripts/09-bridge-run.sh 1000
 QoS: default (reliable, volatile, depth 5) on both sides.
 
 env_node parameters: `seed` (int), `video_path` (mp4 out), `stats_path` (JSON out), `image_codec` (`jpeg`|`png`).
-policy_node parameters: `model_path` (checkpoint dir).
+policy_node parameters: `model_path` (checkpoint dir), `action_chunk_size` (int, default 1).
 
 Adapting to another policy/env: point `model_path` at a 0.6-format checkpoint, and edit the observation preprocessing in `policy_node._infer_and_publish` to match your env's obs keys. Swap `gym.make` in env_node for your environment (or a real robot driver).
 

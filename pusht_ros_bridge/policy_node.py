@@ -3,7 +3,9 @@ diffusion policy on GPU, publishes actions.
 
 ROS graph:
   sub  /pusht/observation  pusht_ros_bridge/PushtObservation (image + agent pos, atomic)
-  pub  /pusht/action       std_msgs/Float32MultiArray (2,)
+  pub  /pusht/action       std_msgs/Float32MultiArray (2,) — one message per
+                           action; with action_chunk_size=N, one observation
+                           round-trip triggers a burst of N such messages
 
 Must run with the lerobot venv interpreter (rclpy is injected via PYTHONPATH):
   source /root/lerobot-venv/bin/activate
@@ -33,6 +35,10 @@ class PushTPolicyNode(Node):
     def __init__(self):
         super().__init__('pusht_policy')
         self.declare_parameter('model_path', DEFAULT_MODEL)
+        # >1 turns on chunk-native transport: one observation round-trip
+        # returns this many actions back-to-back (the env only asks when its
+        # action FIFO runs dry). 1 = classic one-action-per-observation.
+        self.declare_parameter('action_chunk_size', 1)
 
         model_path = self.get_parameter('model_path').value
         self.get_logger().info(f'loading policy: {model_path}')
@@ -48,20 +54,39 @@ class PushTPolicyNode(Node):
             preprocessor_overrides={'device_processor': {'device': 'cuda'}})
         self.get_logger().info(f'{type(self.policy).__name__} ready on {cfg.device}')
 
-        self.action_pub = self.create_publisher(Float32MultiArray, '/pusht/action', 5)
+        # Depth must cover a whole burst: with action_chunk_size=N the node
+        # publishes N action messages back-to-back, and a shallow DDS history
+        # silently drops the tail of the burst mid-chunk.
+        self.action_pub = self.create_publisher(Float32MultiArray, '/pusht/action', 32)
         self.obs_sub = self.create_subscription(
             PushtObservation, '/pusht/observation', self.on_obs, 5)
 
         self._inference_count = 0
+        self._last_obs_fingerprint = None
 
     # ── observation → action (one message = one complete observation) ──
     def on_obs(self, msg: PushtObservation):
         try:
+            # The env heartbeats an unanswered observation verbatim every few
+            # seconds. In step mode a duplicate heartbeat just pops one more
+            # action from the queue, but with action_chunk_size>1 each queued
+            # duplicate triggers a FULL burst — the episode then starts with
+            # several overlapping re-sampled chunks for the same observation,
+            # which poisons the trajectory (measured: near-zero coverage on
+            # seeds the direct loop solves). Deduplicate identical consecutive
+            # observations; a genuine re-send is only answered once.
+            fingerprint = (hash(bytes(msg.image.data)), tuple(msg.agent_pos))
+            if fingerprint == self._last_obs_fingerprint:
+                self.get_logger().debug('duplicate observation (heartbeat), skipped')
+                return
+            self._last_obs_fingerprint = fingerprint
             self._infer_and_publish(msg)
         except Exception:
             # A transient inference failure (CUDA hiccup, bad frame) must not
-            # kill the node — the env has its own timeout fallback.
-            self.get_logger().exception('inference failed, dropping observation')
+            # kill the node — the env has its own timeout fallback. rclpy's
+            # logger has no .exception(); use error + exc_info.
+            self.get_logger().error('inference failed, dropping observation',
+                                    exc_info=True)
 
     def _infer_and_publish(self, msg: PushtObservation):
         if msg.image.format not in ('jpeg', 'png'):
@@ -81,21 +106,38 @@ class PushTPolicyNode(Node):
                              dtype=torch.float32).unsqueeze(0)
 
         ob = {'observation.image': img, 'observation.state': state}
+        batch = self.pre(ob)
+        # select_action re-infers only when its internal action queue is empty,
+        # so a burst of chunk_size calls costs one denoising pass and pops the
+        # whole queue — exactly the policy's own chunking semantics, just
+        # transported in one round-trip instead of eight.
+        #
+        # Chunking without the intermediate observations makes the policy's
+        # obs-history queue half stale at each re-inference ([obs_{t-N}, obs_t]
+        # instead of [obs_{t-1}, obs_t]) — measured as a total quality collapse
+        # on diffusion_pusht (max coverage 1.0 -> 0.02). Resetting before the
+        # burst re-fills the history by duplicating the current observation
+        # ([obs_t, obs_t]), the same well-conditioned pattern the policy sees
+        # at episode start; measured quality returns to step-mode level
+        # (max 1.0, sum 198 vs 205) with none of the collapse.
+        chunk = max(1, int(self.get_parameter('action_chunk_size').value))
         with torch.inference_mode():
-            action = self.post(self.policy.select_action(self.pre(ob)))
+            if chunk > 1:
+                self.policy.reset()
+            for _ in range(chunk):
+                action = self.post(self.policy.select_action(batch))
+                # Never emit a bare scalar: flatten whatever shape the policy produced.
+                values = np.atleast_1d(
+                    action.to('cpu').numpy().astype(np.float32)).flatten().tolist()
+                if len(values) < 2:
+                    self.get_logger().error(f'action has {len(values)} values, need 2, dropped')
+                    return
 
-        # Never emit a bare scalar: flatten whatever shape the policy produced.
-        values = np.atleast_1d(
-            action.to('cpu').numpy().astype(np.float32)).flatten().tolist()
-        if len(values) < 2:
-            self.get_logger().error(f'action has {len(values)} values, need 2, dropped')
-            return
-
-        out = Float32MultiArray()
-        out.data = values
-        self.action_pub.publish(out)
-        self._inference_count += 1
-        if self._inference_count % 100 == 0:
+                out = Float32MultiArray()
+                out.data = values
+                self.action_pub.publish(out)
+                self._inference_count += 1
+        if self._inference_count % 100 < chunk:
             self.get_logger().info(f'inferences={self._inference_count}')
 
 

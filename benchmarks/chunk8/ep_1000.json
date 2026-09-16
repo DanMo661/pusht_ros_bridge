@@ -1,0 +1,1 @@
+{"seed": 1000, "steps": 245, "sum_reward": 147.03, "max_reward": 1.0, "success": true, "episode_wall_s": 88.71, "mean_step_latency_s": 0.0054, "obs_round_trips": 31, "codec": "png"}

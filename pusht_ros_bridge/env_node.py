@@ -42,13 +42,15 @@ class PushTEnvNode(Node):
         self.declare_parameter('image_codec', 'jpeg')  # 'jpeg' (lossy) or 'png' (lossless)
 
         self.obs_pub = self.create_publisher(PushtObservation, '/pusht/observation', 5)
+        # Depth 32 matches the publisher: a chunk burst delivers up to N
+        # messages back-to-back and none of them may be dropped mid-chunk.
         self.action_sub = self.create_subscription(
-            Float32MultiArray, '/pusht/action', self.on_action, 5)
+            Float32MultiArray, '/pusht/action', self.on_action, 32)
 
         # FIFO mailbox: actions queue up across the handshake burst instead of
         # collapsing to the latest one (matches the diffusion policy's own
         # 8-step action-queue semantics).
-        self._action_q = queue.Queue(maxsize=16)
+        self._action_q = queue.Queue(maxsize=32)
 
         self.env = gym.make('gym_pusht/PushT-v0', obs_type='pixels_agent_pos',
                             render_mode='rgb_array')
@@ -122,6 +124,7 @@ class PushTEnvNode(Node):
             return None
 
         rewards, step = [], 0
+        round_trips = 0
         while step < self.MAX_STEPS:
             t_send = time.time()
             obs, reward, terminated, truncated, info = self.env.step(action)
@@ -130,12 +133,20 @@ class PushTEnvNode(Node):
             self.frames.append(self.env.render())
             if terminated or truncated:
                 break
-            self.publish_obs(obs)
-            action = self.wait_action()
-            if action is None:
-                self.get_logger().error('action timeout mid-episode, aborting')
-                return None
             self._step_latencies.append(time.time() - t_send)
+            # Chunk-native cadence: only ask the policy for more actions when
+            # the FIFO runs dry. With a chunking policy this cuts the message
+            # rate by the chunk size; with a one-action policy (chunk=1) the
+            # FIFO empties every step and the cadence is identical to before.
+            try:
+                action = self._action_q.get_nowait()
+            except queue.Empty:
+                self.publish_obs(obs)
+                round_trips += 1
+                action = self.wait_action()
+                if action is None:
+                    self.get_logger().error('action timeout mid-episode, aborting')
+                    return None
             if step % 100 == 0:
                 self.get_logger().info(
                     f'step {step}/{self.MAX_STEPS} reward={reward:.3f} '
@@ -149,6 +160,7 @@ class PushTEnvNode(Node):
             'episode_wall_s': round(wall_s, 2),
             'mean_step_latency_s': round(float(np.mean(self._step_latencies)), 4)
             if self._step_latencies else None,
+            'obs_round_trips': round_trips + 1,  # +1: the handshake observation
             'codec': self.get_parameter('image_codec').value,
         }
         self.get_logger().info(f'EPISODE RESULT {result}')
