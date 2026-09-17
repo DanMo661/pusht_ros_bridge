@@ -21,6 +21,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 import cv2
+import traceback
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.envs.configs import PushtEnv
@@ -84,9 +85,10 @@ class PushTPolicyNode(Node):
         except Exception:
             # A transient inference failure (CUDA hiccup, bad frame) must not
             # kill the node — the env has its own timeout fallback. rclpy's
-            # logger has no .exception(); use error + exc_info.
-            self.get_logger().error('inference failed, dropping observation',
-                                    exc_info=True)
+            # logger supports neither .exception() nor exc_info=, so the
+            # traceback goes into the message body.
+            self.get_logger().error(
+                'inference failed, dropping observation\n' + traceback.format_exc())
 
     def _infer_and_publish(self, msg: PushtObservation):
         if msg.image.format not in ('jpeg', 'png'):
