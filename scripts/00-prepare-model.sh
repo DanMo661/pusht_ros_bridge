@@ -1,23 +1,35 @@
 #!/bin/bash
 # Prepare a lerobot 0.6.x-compatible checkpoint from an old-format Hub model.
-# Works around the incomplete output of migrate_policy_normalization (see
-# https://github.com/huggingface/lerobot/issues/4649): the tool emits the
-# processor files but an empty config.json and no weights — assemble the
-# final directory by hand from the HF snapshot.
+#
+# The migration tool shipped in lerobot <=0.6.1 crashes inside save_pretrained
+# (issue #4649: tuple-typed config fields hit draccus.encode), so this script
+# tolerates a crash: processor files are taken from whatever the tool managed
+# to write, while config.json + model.safetensors ALWAYS come from the pristine
+# HF snapshot. Everything is assembled in a scratch directory and moved into
+# OUT atomically, so an interrupted run can never corrupt an existing OUT.
 #
 # Usage: MODEL_REPO=lerobot/diffusion_pusht OUT=/root/model bash 00-prepare-model.sh
 set -e
 MODEL_REPO=${MODEL_REPO:-lerobot/diffusion_pusht}
 OUT=${OUT:-/root/diffusion_pusht_migrated}
+PY=${PY:-/root/lerobot-venv/bin/python}
 export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}   # CN mirror; unset elsewhere
 export HF_HOME=${HF_HOME:-/root/hf-cache}
 
-# 1. Run the official migration (produces processor files only)
-python -m lerobot.processor.migrate_policy_normalization \
-    --pretrained-path "$MODEL_REPO" --output-dir "$OUT"
+SCRATCH="${OUT}.scratch"
+rm -rf "$SCRATCH" && mkdir -p "$SCRATCH"
 
-# 2. Fetch the raw snapshot (config.json + model weights) and complete the dir
-python - "$MODEL_REPO" "$OUT" <<'PY'
+# 1. official migration — produces the pre/post-processor files; may crash (see header)
+"$PY" -m lerobot.processor.migrate_policy_normalization \
+    --pretrained-path "$MODEL_REPO" --output-dir "$SCRATCH" \
+    || echo "NOTE: migration tool crashed (known issue #4649) — assembling from snapshot"
+
+# 2. pristine config + weights: local dir or HF snapshot
+if [ -d "$MODEL_REPO" ]; then
+    cp "$MODEL_REPO/config.json" "$MODEL_REPO/model.safetensors" "$SCRATCH/"
+    echo "copied config.json + model.safetensors from $MODEL_REPO"
+else
+    "$PY" - "$MODEL_REPO" "$SCRATCH" <<'PY'
 import sys, shutil
 from pathlib import Path
 from huggingface_hub import snapshot_download
@@ -29,15 +41,21 @@ for name in ("config.json", "model.safetensors"):
     shutil.copy(src, out / name)
     print(f"copied {name} ({src.stat().st_size} bytes)")
 PY
+fi
 
-# 3. Sanity check: config parses and weights load
-python - "$OUT" <<'PY'
-import sys, json
+# 3. sanity check before touching OUT
+"$PY" - "$SCRATCH" <<'PY'
+import sys, json, os
 out = sys.argv[1]
 cfg = json.load(open(f"{out}/config.json"))
 assert cfg.get("type"), "config.json has no policy type"
-import os
 assert os.path.getsize(f"{out}/model.safetensors") > 1_000_000, "weights look wrong"
-print("model dir OK:", out)
+for name in ("policy_preprocessor.json", "policy_postprocessor.json"):
+    assert os.path.getsize(f"{out}/{name}") > 0, f"{name} missing — migration produced nothing at all"
+print("assembled model dir OK:", out)
 PY
+
+# 4. atomic swap into place
+rm -rf "$OUT"
+mv "$SCRATCH" "$OUT"
 echo "PREPARE_MODEL_DONE"

@@ -55,9 +55,13 @@ class PushTEnvNode(Node):
         self.env = gym.make('gym_pusht/PushT-v0', obs_type='pixels_agent_pos',
                             render_mode='rgb_array')
         seed = self.get_parameter('seed').value
+        codec = self.get_parameter('image_codec').value
+        if codec not in ('jpeg', 'png'):
+            # Fail fast: an unrecognized value must not silently degrade to lossy jpeg.
+            raise ValueError(f"invalid image_codec {codec!r}, use 'jpeg' or 'png'")
         self.get_logger().info(f'PushT env ready, will reset with seed={seed}')
         self.frames = []
-        self._step_latencies = []
+        self._round_trip_latencies = []
 
     # ── action intake (called on the spin thread) ──────────────
     def on_action(self, msg: Float32MultiArray):
@@ -123,17 +127,14 @@ class PushTEnvNode(Node):
             self.get_logger().error('policy node never answered, aborting')
             return None
 
-        rewards, step = [], 0
-        round_trips = 0
+        rewards, step, round_trips = [], 0, 0
         while step < self.MAX_STEPS:
-            t_send = time.time()
             obs, reward, terminated, truncated, info = self.env.step(action)
             rewards.append(float(reward))
             step += 1
             self.frames.append(self.env.render())
             if terminated or truncated:
                 break
-            self._step_latencies.append(time.time() - t_send)
             # Chunk-native cadence: only ask the policy for more actions when
             # the FIFO runs dry. With a chunking policy this cuts the message
             # rate by the chunk size; with a one-action policy (chunk=1) the
@@ -143,7 +144,12 @@ class PushTEnvNode(Node):
             except queue.Empty:
                 self.publish_obs(obs)
                 round_trips += 1
+                # Time the observation round-trip (obs sent -> action received).
+                # chunk=1: sampled every step; chunk=N: only at burst boundaries,
+                # where the wait is the re-planning denoise pass.
+                t_request = time.time()
                 action = self.wait_action()
+                self._round_trip_latencies.append(time.time() - t_request)
                 if action is None:
                     self.get_logger().error('action timeout mid-episode, aborting')
                     return None
@@ -158,8 +164,8 @@ class PushTEnvNode(Node):
             'sum_reward': round(sum(rewards), 2), 'max_reward': round(max(rewards), 4),
             'success': bool(info.get('is_success')),
             'episode_wall_s': round(wall_s, 2),
-            'mean_step_latency_s': round(float(np.mean(self._step_latencies)), 4)
-            if self._step_latencies else None,
+            'mean_round_trip_s': round(float(np.mean(self._round_trip_latencies)), 4)
+            if self._round_trip_latencies else None,
             'obs_round_trips': round_trips + 1,  # +1: the handshake observation
             'codec': self.get_parameter('image_codec').value,
         }

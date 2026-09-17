@@ -9,7 +9,8 @@ export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
 PY=/root/lerobot-venv/bin/python
-SRC=/root/ros2_ws/src/pusht_ros_bridge/pusht_ros_bridge
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$REPO_DIR/pusht_ros_bridge"
 BENCH=/root/ros_bench
 rm -rf $BENCH && mkdir -p $BENCH
 

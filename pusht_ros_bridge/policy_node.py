@@ -150,6 +150,9 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except rclpy.executors.ExternalShutdownException:
+        # Normal exit path when the launcher stops us mid-spin; don't dump a trace.
+        pass
     finally:
         rclpy.try_shutdown()
         node.destroy_node()

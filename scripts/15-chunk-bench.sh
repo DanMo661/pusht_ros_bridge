@@ -10,7 +10,8 @@ export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
 PY=/root/lerobot-venv/bin/python
-SRC=/root/ros2_ws/src/pusht_ros_bridge/pusht_ros_bridge
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$REPO_DIR/pusht_ros_bridge"
 BENCH=${BENCH:-/root/chunk_bench}
 CHUNK=${CHUNK:-8}
 rm -rf $BENCH && mkdir -p $BENCH
@@ -33,7 +34,7 @@ rows = [json.load(open(f)) for f in sorted(glob.glob('$BENCH/ep_*.json'))]
 if not rows:
     print('NO RESULTS'); raise SystemExit(1)
 succ = sum(r['success'] for r in rows)
-lat = [r['mean_step_latency_s'] for r in rows if r['mean_step_latency_s']]
+lat = [r.get('mean_round_trip_s') or r.get('mean_step_latency_s') for r in rows if r.get('mean_round_trip_s') or r.get('mean_step_latency_s')]
 wall = [r['episode_wall_s'] for r in rows]
 rt = [r.get('obs_round_trips') or r['steps'] for r in rows]
 print(f"CHUNK$CHUNK/PNG: episodes={len(rows)} success={succ}/{len(rows)} "
