@@ -1,6 +1,10 @@
 #!/bin/bash
-# Chunk-native transport 10-episode benchmark: PNG lossless + action_chunk_size=8,
-# same seeds 1000-1009 as the step-by-step jpeg/png/cli baselines.
+# Real-time (async receding-horizon) benchmark: policy worker thread
+# (async_inference) + proactive FIFO refill (refill_watermark) on top of
+# chunked execution. Same PNG codec and seeds 1000-1009 as 15-chunk-bench.sh,
+# so rows are directly comparable to the chunk sweep.
+# CHUNK / WATERMARK / ASYNC override the knobs; ASYNC=false + WATERMARK=-1
+# reproduces the synchronous 15-chunk-bench.sh run exactly.
 set -e
 WS=${WS:-/root/ros2_ws}
 source /opt/ros/jazzy/setup.bash
@@ -12,17 +16,21 @@ export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
 PY=/root/lerobot-venv/bin/python
 SRC="$WS/src/pusht_ros_bridge/pusht_ros_bridge"
-BENCH=${BENCH:-/root/chunk_bench}
+BENCH=${BENCH:-/root/rtc_bench}
 CHUNK=${CHUNK:-8}
+WATERMARK=${WATERMARK:-4}
+ASYNC=${ASYNC:-true}
+TAG="CHUNK$CHUNK"
+[ "$ASYNC" = true ] && TAG="${TAG}+ASYNC wm$WATERMARK"
 rm -rf "$BENCH" && mkdir -p "$BENCH"
 
 for SEED in $(seq 1000 1009); do
-    $PY $SRC/policy_node.py --ros-args -p action_chunk_size:=$CHUNK \
-        > /tmp/chunk_policy_$SEED.log 2>&1 &
+    $PY $SRC/policy_node.py --ros-args -p action_chunk_size:=$CHUNK -p async_inference:=$ASYNC \
+        > /tmp/rtc_policy_$SEED.log 2>&1 &
     POLICY_PID=$!
     timeout 400 $PY $SRC/env_node.py --ros-args -p seed:=$SEED \
-        -p image_codec:=png -p stats_path:=$BENCH/ep_$SEED.json \
-        > /tmp/chunk_env_$SEED.log 2>&1 || true
+        -p image_codec:=png -p refill_watermark:=$WATERMARK -p stats_path:=$BENCH/ep_$SEED.json \
+        > /tmp/rtc_env_$SEED.log 2>&1 || true
     kill $POLICY_PID 2>/dev/null || true
     sleep 1
     cat $BENCH/ep_$SEED.json 2>/dev/null || echo "FAILED: $SEED"
@@ -37,7 +45,7 @@ succ = sum(r['success'] for r in rows)
 lat = [r.get('mean_round_trip_s') or r.get('mean_step_latency_s') for r in rows if r.get('mean_round_trip_s') or r.get('mean_step_latency_s')]
 wall = [r['episode_wall_s'] for r in rows]
 rt = [r.get('obs_round_trips') or r['steps'] for r in rows]
-print(f"CHUNK$CHUNK/PNG: episodes={len(rows)} success={succ}/{len(rows)} "
+print(f"$TAG/PNG: episodes={len(rows)} success={succ}/{len(rows)} "
       f"({100*succ/len(rows):.0f}%) "
       f"mean_sum={sum(r['sum_reward'] for r in rows)/len(rows):.1f} "
       f"mean_wall={sum(wall)/len(wall):.1f}s "
@@ -48,4 +56,4 @@ for r in rows:
           f"max={r['max_reward']} success={r['success']} wall={r['episode_wall_s']}s "
           f"trips={r.get('obs_round_trips')}")
 EOF
-echo CHUNK_BENCH_DONE
+echo RTC_BENCH_DONE

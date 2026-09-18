@@ -40,6 +40,12 @@ class PushTEnvNode(Node):
         self.declare_parameter('video_path', '')
         self.declare_parameter('stats_path', '')
         self.declare_parameter('image_codec', 'jpeg')  # 'jpeg' (lossy) or 'png' (lossless)
+        # -1 = legacy: ask the policy only when the action FIFO is completely
+        # dry. >=0 = receding-horizon refill: once the queue falls to this many
+        # pending actions, publish the latest observation WITHOUT blocking, so
+        # an async policy node re-plans on fresh state while the remaining
+        # queued actions execute.
+        self.declare_parameter('refill_watermark', -1)
 
         self.obs_pub = self.create_publisher(PushtObservation, '/pusht/observation', 5)
         # Depth 32 matches the publisher: a chunk burst delivers up to N
@@ -128,6 +134,7 @@ class PushTEnvNode(Node):
             return None
 
         rewards, step, round_trips = [], 0, 0
+        watermark = max(-1, int(self.get_parameter('refill_watermark').value))
         while step < self.MAX_STEPS:
             obs, reward, terminated, truncated, info = self.env.step(action)
             rewards.append(float(reward))
@@ -142,6 +149,8 @@ class PushTEnvNode(Node):
             try:
                 action = self._action_q.get_nowait()
             except queue.Empty:
+                action = None
+            if action is None:
                 self.publish_obs(obs)
                 round_trips += 1
                 # Time the observation round-trip (obs sent -> action received).
@@ -153,6 +162,12 @@ class PushTEnvNode(Node):
                 if action is None:
                     self.get_logger().error('action timeout mid-episode, aborting')
                     return None
+            elif watermark >= 0 and self._action_q.qsize() <= watermark:
+                # Receding-horizon refill: fire-and-forget refresh so an async
+                # policy node plans against this fresh state while the queued
+                # actions execute. No wait, so no round-trip latency sample.
+                self.publish_obs(obs)
+                round_trips += 1
             if step % 100 == 0:
                 self.get_logger().info(
                     f'step {step}/{self.MAX_STEPS} reward={reward:.3f} '
@@ -168,6 +183,7 @@ class PushTEnvNode(Node):
             if self._round_trip_latencies else None,
             'obs_round_trips': round_trips + 1,  # +1: the handshake observation
             'codec': self.get_parameter('image_codec').value,
+            'refill_watermark': watermark,
         }
         self.get_logger().info(f'EPISODE RESULT {result}')
 

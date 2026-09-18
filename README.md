@@ -88,6 +88,34 @@ bash scripts/15-chunk-bench.sh                           # 10-episode benchmark
 
 Data note: the committed `benchmarks/chunk2|4|8/` JSONs predate the latency-field rename — their `mean_step_latency_s` (~0.01 s) was measured around the env step only under the interim cadence and is superseded by `mean_round_trip_s` (observation sent → action received) in any run after commit `adc394e`.
 
+## Real-time mode (`async_inference`, `refill_watermark`)
+
+The classic flow is synchronous request-reply: the env asks when its FIFO runs dry, and the policy node infers **inside the subscription callback**. Two parameters loosen that coupling, in the direction Real-Time-Chunking-style serving points:
+
+- **policy_node `async_inference:=true`** — inference moves to a worker thread. The callback only slots the newest observation; observations arriving while an inference is in flight collapse to the latest one (receding horizon), and the worker re-plans the moment it finishes. A failed inference re-arms the dedup gate, so the env's next heartbeat (~2 s) retries it instead of starving to the env's timeout. Shutdown races (kill mid-plan) exit quietly.
+- **env_node `refill_watermark:=K`** (default −1 = off) — with K ≥ 0, the env publishes the latest observation **without blocking** as soon as ≤ K actions remain queued, so a re-plan is requested while earlier actions are still executing.
+
+Measured on the chunk-8 PNG sweep (same seeds 1000–1009 / 1000–1004; this session ran on a thermally throttled GPU — compare within the table, not against the published walls above):
+
+| config | Success | Mean max coverage | obs round-trips |
+|---|---|---|---|
+| sync, ask-when-dry (published sweep, cooled GPU) | 5/10 | 0.919 | 29.8 |
+| async, ask-when-dry (`wm:=-1`, n=5) | 3/5 | 0.798 | = steps/8 exactly |
+| async + `refill_watermark:=4` (n=10) | **0/10** | 0.646 | 224 (≈ every step) |
+
+Reading the numbers:
+
+- **The worker thread itself costs nothing**: per-plan latency is identical to the synchronous flow (1.6 s-class per chunk-8 denoising pass, measured back-to-back in the same session), and ask-when-dry async lands within sync chunk-8's range (3/5 vs 5/10 at these sample sizes) with round-trips exactly steps/8. Use it to keep the ROS executor responsive and for the heartbeat self-heal.
+- **Proactive refill poisons this task (0/10), and the mechanism matters more than the number**: each watermark-triggered observation produces a burst that queues *behind* the actions still pending. Bursts stack several deep, every one of them conditioned on an observation captured before its queued predecessors execute, and the FIFO effectively never runs dry — so the dry-path request, the only one that re-conditions on truly fresh state, almost never fires. The failure signature is the chunk sweep's open-loop one, amplified: several episodes reach max coverage 0.98+ and cannot hold it.
+- This regime is **inference-bound**: one denoising pass (1.6–2 s here) yields only 8 actions that the env consumes in milliseconds, so no watermark can hide the latency and every queued burst is stale by construction. Real-time chunking pays off when inference fits **inside** the control period (fast policies, fixed-rate control loops) — there, `async_inference` plus a small watermark is the right shape. A latest-wins mailbox (a fresh chunk supersedes the queued remainder instead of appending) is the natural next step and is not implemented yet.
+
+```bash
+CHUNK=8 WATERMARK=4 bash scripts/16-rtc-async-bench.sh                  # async + proactive refill
+CHUNK=8 WATERMARK=-1 ASYNC=false bash scripts/16-rtc-async-bench.sh     # sync chunk-8 reference
+```
+
+Raw per-episode JSON: [`benchmarks/rtc_async_wm4/`](benchmarks/rtc_async_wm4/) (10 seeds) and [`benchmarks/rtc_async_wm0/`](benchmarks/rtc_async_wm0/) (5 seeds). The env stats JSON records `refill_watermark` for provenance.
+
 ## Nodes & parameters
 
 | Node | Topic | Type | Dir |
@@ -99,8 +127,8 @@ Data note: the committed `benchmarks/chunk2|4|8/` JSONs predate the latency-fiel
 
 QoS: reliable + volatile on both sides; observation depth 5, action depth **32** — the action history must be deep enough to hold a whole burst without dropping its tail.
 
-env_node parameters: `seed` (int), `video_path` (mp4 out), `stats_path` (JSON out), `image_codec` (`jpeg`|`png`).
-policy_node parameters: `model_path` (checkpoint dir), `action_chunk_size` (int, default 1).
+env_node parameters: `seed` (int), `video_path` (mp4 out), `stats_path` (JSON out), `image_codec` (`jpeg`|`png`), `refill_watermark` (int, default −1 = ask-when-dry; ≥0 = receding-horizon refill, see real-time mode).
+policy_node parameters: `model_path` (checkpoint dir), `action_chunk_size` (int, default 1), `async_inference` (bool, default false = synchronous request-reply).
 
 Adapting to another policy/env: point `model_path` at a 0.6-format checkpoint, and edit the observation preprocessing in `policy_node._infer_and_publish` to match your env's obs keys. Swap `gym.make` in env_node for your environment (or a real robot driver).
 
@@ -135,6 +163,8 @@ bash scripts/09-bridge-run.sh 7             # seed
 bash scripts/10-bridge-bench.sh             # bridge, jpeg
 bash scripts/12-png-bench.sh                # bridge, png
 bash scripts/11-cli-bench.sh                # lerobot CLI baseline
+bash scripts/15-chunk-bench.sh              # chunked execution
+bash scripts/16-rtc-async-bench.sh          # real-time mode (async + refill)
 ```
 
 Why not `ros2 run`: it always launches nodes with the **system** Python, and the policy node needs `rclpy` + `lerobot` in the same (venv) interpreter. The run scripts execute both nodes with the venv Python directly, with ROS site-packages injected:
@@ -143,6 +173,8 @@ Why not `ros2 run`: it always launches nodes with the **system** Python, and the
 export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 ```
+
+(The alternative is creating the venv with `--system-site-packages` so ROS packages resolve inside it — see the aggregated workaround in [ros2/ros2#1094](https://github.com/ros2/ros2/issues/1094). These scripts take the explicit `PYTHONPATH` route instead, which keeps the venv hermetic.)
 
 ## Gotchas baked into the code (lerobot 0.6.1)
 
@@ -155,7 +187,7 @@ export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 ## Limitations
 
 - jpeg transport measurably hurts final-alignment precision (see benchmark); use `image_codec:=png` unless bandwidth demands jpeg.
-- Synchronous request-reply semantics implemented on pub/sub; an action/service-based design would be more idiomatic for tight control loops, this follows the RFC's topic-first direction.
+- The default flow is synchronous request-reply on topics; `async_inference` moves planning off the executor and onto the freshest observation, but an action/service-based graph would be more idiomatic for tight control loops — this follows the RFC's topic-first direction.
 - Single env, single policy, n=10 statistics.
 
 ## License

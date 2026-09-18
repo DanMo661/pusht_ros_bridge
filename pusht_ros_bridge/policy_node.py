@@ -21,6 +21,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32MultiArray
 import cv2
+import threading
 import traceback
 
 from lerobot.configs.policies import PreTrainedConfig
@@ -40,6 +41,11 @@ class PushTPolicyNode(Node):
         # returns this many actions back-to-back (the env only asks when its
         # action FIFO runs dry). 1 = classic one-action-per-observation.
         self.declare_parameter('action_chunk_size', 1)
+        # Real-time mode: inference moves off the ROS executor onto a worker
+        # thread that always plans against the newest observation (receding
+        # horizon). Pairs with the env node's refill_watermark>=0. False keeps
+        # the classic synchronous request/response flow.
+        self.declare_parameter('async_inference', False)
 
         model_path = self.get_parameter('model_path').value
         self.get_logger().info(f'loading policy: {model_path}')
@@ -65,6 +71,15 @@ class PushTPolicyNode(Node):
         self._inference_count = 0
         self._last_obs_fingerprint = None
 
+        # Receding-horizon plumbing (async_inference=true): on_obs only slots
+        # the newest observation; the daemon worker turns it into a burst.
+        self.async_mode = bool(self.get_parameter('async_inference').value)
+        self._latest_obs = None
+        self._pending_fp = None   # fingerprint of the newest stored observation
+        self._planned_fp = None   # fingerprint last handed to inference
+        self._obs_gate = threading.Condition()
+        self._stop_evt = threading.Event()
+
     # ── observation → action (one message = one complete observation) ──
     def on_obs(self, msg: PushtObservation):
         try:
@@ -77,6 +92,18 @@ class PushTPolicyNode(Node):
             # seeds the direct loop solves). Deduplicate identical consecutive
             # observations; a genuine re-send is only answered once.
             fingerprint = (hash(bytes(msg.image.data)), tuple(msg.agent_pos))
+            if self.async_mode:
+                with self._obs_gate:
+                    if fingerprint == self._pending_fp:
+                        self.get_logger().debug('duplicate observation (heartbeat), skipped')
+                        return
+                    # Obs arriving while an inference is in flight collapse to
+                    # the newest one: the plan that matters is the one against
+                    # the freshest state (receding horizon).
+                    self._latest_obs = msg
+                    self._pending_fp = fingerprint
+                    self._obs_gate.notify()
+                return
             if fingerprint == self._last_obs_fingerprint:
                 self.get_logger().debug('duplicate observation (heartbeat), skipped')
                 return
@@ -89,6 +116,36 @@ class PushTPolicyNode(Node):
             # traceback goes into the message body.
             self.get_logger().error(
                 'inference failed, dropping observation\n' + traceback.format_exc())
+
+    def _planner_loop(self):
+        """Async-mode worker: plan against the newest observation, forever."""
+        while not self._stop_evt.is_set():
+            with self._obs_gate:
+                while not self._stop_evt.is_set() and self._pending_fp == self._planned_fp:
+                    self._obs_gate.wait(timeout=1.0)
+                if self._stop_evt.is_set():
+                    return
+                msg = self._latest_obs
+                self._planned_fp = self._pending_fp
+            try:
+                self._infer_and_publish(msg)
+            except Exception:
+                if self._stop_evt.is_set() or not rclpy.ok():
+                    return  # shutdown race (kill mid-plan), not a real failure
+                # Re-arm the gate so the env's next heartbeat (same bytes)
+                # passes the dedup check and the observation is retried once
+                # per heartbeat instead of starving until the env's timeout.
+                with self._obs_gate:
+                    self._pending_fp = None
+                    self._planned_fp = None
+                self.get_logger().error(
+                    'async inference failed, will retry on next heartbeat\n'
+                    + traceback.format_exc())
+
+    def request_stop(self):
+        self._stop_evt.set()
+        with self._obs_gate:
+            self._obs_gate.notify_all()
 
     def _infer_and_publish(self, msg: PushtObservation):
         if msg.image.format not in ('jpeg', 'png'):
@@ -146,6 +203,10 @@ class PushTPolicyNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PushTPolicyNode()
+    worker = None
+    if node.async_mode:
+        worker = threading.Thread(target=node._planner_loop, daemon=True)
+        worker.start()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
@@ -153,8 +214,16 @@ def main(args=None):
     except rclpy.executors.ExternalShutdownException:
         # Normal exit path when the launcher stops us mid-spin; don't dump a trace.
         pass
+    except rclpy.error.RCLError:
+        # Shutdown can also race spin's wait-set creation (kill mid-plan).
+        # Same normal exit path, but a live context means a real error.
+        if rclpy.ok():
+            raise
     finally:
+        node.request_stop()
         rclpy.try_shutdown()
+        if worker is not None:
+            worker.join(timeout=2.0)
         node.destroy_node()
 
 
