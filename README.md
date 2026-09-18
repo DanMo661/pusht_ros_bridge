@@ -69,11 +69,11 @@ Chunking policies (diffusion, VQ-BeT) internally plan `n_action_steps` actions p
 | 2 | 0/10 | 0.488 | 150 |
 | 4 | 1/10 | 0.854 | 72.9 |
 | 8 | 5/10 | 0.919 | 29.8 |
-| *direct in-process chunk-8 (no ROS, reference)* | *2/10* | *0.81* | *0* |
+| *direct in-process chunk-8 (no ROS, reference)* | *2/10* | *0.85* | *0* |
 
 Reading the numbers:
 
-- **Round-trips scale exactly as 300/N** (measured: 150 / 72.9 / 29.8), and each burst boundary pays one denoising pass (~2 s for this policy on an RTX 4060), so denoising passes per episode also scale as 300/N: chunk-8 needs 38 passes vs step-by-step's 34 — hence the near-identical wall time (81.0 s vs 78.7 s, both on a thermally healthy GPU) — while smaller N re-plans far more often and pays proportionally more wall time (chunk-2: 150 passes; its benchmark ran on a thermally throttled GPU, so its 298 s wall is not directly comparable). The transport win is that a burst boundary is the *only* place the control loop waits: on a bandwidth-limited or jittery link (real robot over Wi-Fi) this is the difference between a control loop that stalls and one that never waits.
+- **Round-trips scale exactly as 300/N** (measured: 150 / 72.9 / 29.8), and each burst boundary pays one denoising pass (~2 s for this policy on an RTX 4060), so denoising passes per episode scale as steps/N: the chunk-8 run averaged 29.8 passes and 81.0 s wall vs step-by-step's 232-step episodes averaging ~29 passes and 78.7 s — near-identical wall at N=8 — while smaller N re-plans far more often and pays proportionally more wall time (chunk-2 averaged 150 passes; its benchmark ran on a thermally throttled GPU, so its 298 s wall is not directly comparable). The transport win is that a burst boundary is the *only* place the control loop waits: on a bandwidth-limited or jittery link (real robot over Wi-Fi) this is the difference between a control loop that stalls and one that never waits.
 - **Chunking costs success on this task, and the mechanism is feedback latency**: every action k..k+7 is planned from one observation, so the policy corrects N× less often. The failure signature is characteristic — episodes reach high coverage (0.96+ in several cases) but cannot *hold* it to the end, exactly the open-loop degradation that motivates re-conditioning schemes like Real-Time Chunking. The bridge matches the direct in-process chunk-8 baseline within sampling variance, so the transport adds nothing on top.
 - **Differences among N∈{2,4,8} are not resolvable at n=10**: the diffusion policy samples stochastically and unseeded, and the N=2 row scoring *below* N=8 makes that plain — with ~10 draws of a bimodal policy the ordering inside the chunked regime is noise. What survives is the comparison against N=1 (every chunked point is clearly worse) and the exact round-trip scaling. Resolving a sweet spot would need seeded paired rollouts; treat N as a transport knob, keep N=1 when control quality matters, and validate on your own task.
 - Three conditions must hold for the burst to work at all, all learned the hard way:
@@ -85,6 +85,8 @@ Reading the numbers:
 CHUNK=8 CODEC=png bash scripts/09-bridge-run.sh 1000     # one episode
 bash scripts/15-chunk-bench.sh                           # 10-episode benchmark
 ```
+
+Data note: the committed `benchmarks/chunk2|4|8/` JSONs predate the latency-field rename — their `mean_step_latency_s` (~0.01 s) was measured around the env step only under the interim cadence and is superseded by `mean_round_trip_s` (observation sent → action received) in any run after commit `adc394e`.
 
 ## Nodes & parameters
 

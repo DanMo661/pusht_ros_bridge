@@ -18,6 +18,7 @@ export HF_HOME=${HF_HOME:-/root/hf-cache}
 
 SCRATCH="${OUT}.scratch"
 rm -rf "$SCRATCH" && mkdir -p "$SCRATCH"
+trap 'rm -rf "$SCRATCH"' EXIT
 
 # 1. official migration — produces the pre/post-processor files; may crash (see header)
 "$PY" -m lerobot.processor.migrate_policy_normalization \
@@ -55,7 +56,11 @@ for name in ("policy_preprocessor.json", "policy_postprocessor.json"):
 print("assembled model dir OK:", out)
 PY
 
-# 4. atomic swap into place
-rm -rf "$OUT"
+# 4. swap into place via renames only: rm+mv would leave a ~1 s window in
+#    which an interrupted run destroys an existing OUT.
+if [ -e "$OUT" ]; then
+    mv "$OUT" "${OUT}.old"
+fi
 mv "$SCRATCH" "$OUT"
+rm -rf "${OUT}.old"
 echo "PREPARE_MODEL_DONE"

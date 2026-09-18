@@ -3,18 +3,18 @@
 # same seeds 1000-1009 as the step-by-step jpeg/png/cli baselines.
 set -e
 source /opt/ros/jazzy/setup.bash
-source /root/ros2_ws/install/setup.bash
+source "$WS/install/setup.bash"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export SDL_VIDEODRIVER=dummy
 export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
 PY=/root/lerobot-venv/bin/python
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO_DIR/pusht_ros_bridge"
+WS=${WS:-/root/ros2_ws}
+SRC="$WS/src/pusht_ros_bridge/pusht_ros_bridge"
 BENCH=${BENCH:-/root/chunk_bench}
 CHUNK=${CHUNK:-8}
-rm -rf $BENCH && mkdir -p $BENCH
+rm -rf "$BENCH" && mkdir -p "$BENCH"
 
 for SEED in $(seq 1000 1009); do
     $PY $SRC/policy_node.py --ros-args -p action_chunk_size:=$CHUNK \
