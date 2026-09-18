@@ -226,9 +226,14 @@ def main(args=None):
     # path as Ctrl-C instead of dying mid-publish with a dead-context traceback.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
+    term_code = None
     try:
         result = node.run_episode()
-    except (KeyboardInterrupt, SystemExit):
+    except SystemExit as e:
+        # The SIGTERM handler raises SystemExit(143); propagate "terminated"
+        # as the exit code instead of collapsing it into a generic failure.
+        result, term_code = None, e.code
+    except KeyboardInterrupt:
         result = None
     finally:
         try:
@@ -240,6 +245,8 @@ def main(args=None):
         spin_thread.join(timeout=2.0)
         node.destroy_node()
 
+    if term_code is not None:
+        sys.exit(term_code)
     sys.exit(0 if result is not None else 1)
 
 

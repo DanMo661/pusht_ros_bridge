@@ -31,7 +31,7 @@ SEED=${1:-7}
 MODEL=${MODEL:-/root/diffusion_pusht_migrated}
 CHUNK=${CHUNK:-1}
 CODEC=${CODEC:-jpeg}
-ASYNC=${ASYNC:-false}
+ASYNC=$(echo "${ASYNC:-false}" | tr '[:upper:]' '[:lower:]')
 WATERMARK=${WATERMARK:--1}
 rm -rf "$OUT" && mkdir -p "$OUT"
 

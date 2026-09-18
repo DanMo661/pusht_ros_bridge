@@ -139,8 +139,9 @@ Tested with ROS 2 Jazzy on Ubuntu 24.04 (WSL2) and a Python 3.12 venv containing
 `pip install "lerobot[dataset,pusht,diffusion]==0.6.1"` (torch CUDA build) with
 `gym_pusht` importable in the same interpreter. The scripts default to
 `/root/lerobot-venv/bin/python` and the colcon workspace `/root/ros2_ws`;
-override with `PY=` / `WS=`. Migration of old-format checkpoints is covered by
-`scripts/00-prepare-model.sh` (see Gotchas #2).
+override with `PY=` / `WS=` (bench 11 derives its venv activate script from
+`PY`, so point it at a venv's `bin/python`). Migration of old-format
+checkpoints is covered by `scripts/00-prepare-model.sh` (see Gotchas #2).
 
 ## Running
 
