@@ -113,9 +113,12 @@ class PushTPolicyNode(Node):
             # A transient inference failure (CUDA hiccup, bad frame) must not
             # kill the node — the env has its own timeout fallback. rclpy's
             # logger supports neither .exception() nor exc_info=, so the
-            # traceback goes into the message body.
+            # traceback goes into the message body. Re-arm the dedup gate so
+            # the env's heartbeat (same bytes) retries instead of starving.
+            self._last_obs_fingerprint = None
             self.get_logger().error(
-                'inference failed, dropping observation\n' + traceback.format_exc())
+                'inference failed, will retry on next heartbeat\n'
+                + traceback.format_exc())
 
     def _planner_loop(self):
         """Async-mode worker: plan against the newest observation, forever."""
@@ -214,9 +217,10 @@ def main(args=None):
     except rclpy.executors.ExternalShutdownException:
         # Normal exit path when the launcher stops us mid-spin; don't dump a trace.
         pass
-    except rclpy.error.RCLError:
-        # Shutdown can also race spin's wait-set creation (kill mid-plan).
-        # Same normal exit path, but a live context means a real error.
+    except Exception:
+        # Killing mid-plan can also race spin's wait-set setup and surface as
+        # a bare RCLError from an already-dead context (rclpy has no public
+        # name for it). A live context means a real error — re-raise.
         if rclpy.ok():
             raise
     finally:

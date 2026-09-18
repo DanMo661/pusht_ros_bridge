@@ -1,7 +1,8 @@
 #!/bin/bash
 # CLI 直连 10 回合基准：同模型同 seed 集（1000-1009）
 set -e
-source /root/lerobot-venv/bin/activate
+PY=${PY:-/root/lerobot-venv/bin/python}
+source "$(dirname "$PY")/activate"
 export SDL_VIDEODRIVER=dummy
 export HF_HOME=/root/hf-cache
 

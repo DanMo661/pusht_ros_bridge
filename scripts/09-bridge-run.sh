@@ -2,7 +2,8 @@
 # Run one episode: env node + policy node, both with the lerobot venv python
 # (ros2 run forces the system python, which lacks the venv dependencies; rclpy
 # and the generated message module are injected below).
-# All paths are overridable: WS (colcon workspace), PY, MODEL, CHUNK, CODEC, BRIDGE_OUT.
+# All paths are overridable: WS (colcon workspace), PY, MODEL, CHUNK, CODEC,
+# ASYNC (policy async_inference), WATERMARK (env refill_watermark), BRIDGE_OUT.
 set -e
 WS=${WS:-/root/ros2_ws}
 # Nodes run from the workspace copy (native Linux filesystem — running from a
@@ -30,9 +31,12 @@ SEED=${1:-7}
 MODEL=${MODEL:-/root/diffusion_pusht_migrated}
 CHUNK=${CHUNK:-1}
 CODEC=${CODEC:-jpeg}
+ASYNC=${ASYNC:-false}
+WATERMARK=${WATERMARK:--1}
 rm -rf "$OUT" && mkdir -p "$OUT"
 
-$PY $SRC/policy_node.py --ros-args -p model_path:=$MODEL -p action_chunk_size:=$CHUNK > $OUT/policy.log 2>&1 &
+$PY $SRC/policy_node.py --ros-args -p model_path:=$MODEL -p action_chunk_size:=$CHUNK \
+    -p async_inference:=$ASYNC > $OUT/policy.log 2>&1 &
 POLICY_PID=$!
 
 # Wait for the policy to finish loading (log line), but bail out immediately
@@ -49,7 +53,7 @@ done
 
 timeout 600 $PY $SRC/env_node.py --ros-args -p seed:=$SEED \
     -p video_path:=$OUT/ros_episode.mp4 -p stats_path:=$OUT/stats.json \
-    -p image_codec:=$CODEC \
+    -p image_codec:=$CODEC -p refill_watermark:=$WATERMARK \
     > $OUT/env.log 2>&1 &
 ENV_PID=$!
 # Watchdog: a policy crash must not leave the env waiting for its full timeout.

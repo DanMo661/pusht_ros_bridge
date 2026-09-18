@@ -3,6 +3,7 @@
 # same seeds 1000-1009 as the step-by-step jpeg/png/cli baselines.
 set -e
 WS=${WS:-/root/ros2_ws}
+PY=${PY:-/root/lerobot-venv/bin/python}
 source /opt/ros/jazzy/setup.bash
 source "$WS/install/setup.bash"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
@@ -10,7 +11,6 @@ export SDL_VIDEODRIVER=dummy
 export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
-PY=/root/lerobot-venv/bin/python
 SRC="$WS/src/pusht_ros_bridge/pusht_ros_bridge"
 BENCH=${BENCH:-/root/chunk_bench}
 CHUNK=${CHUNK:-8}

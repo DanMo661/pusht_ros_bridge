@@ -93,7 +93,7 @@ Data note: the committed `benchmarks/chunk2|4|8/` JSONs predate the latency-fiel
 The classic flow is synchronous request-reply: the env asks when its FIFO runs dry, and the policy node infers **inside the subscription callback**. Two parameters loosen that coupling, in the direction Real-Time-Chunking-style serving points:
 
 - **policy_node `async_inference:=true`** — inference moves to a worker thread. The callback only slots the newest observation; observations arriving while an inference is in flight collapse to the latest one (receding horizon), and the worker re-plans the moment it finishes. A failed inference re-arms the dedup gate, so the env's next heartbeat (~2 s) retries it instead of starving to the env's timeout. Shutdown races (kill mid-plan) exit quietly.
-- **env_node `refill_watermark:=K`** (default −1 = off) — with K ≥ 0, the env publishes the latest observation **without blocking** as soon as ≤ K actions remain queued, so a re-plan is requested while earlier actions are still executing.
+- **env_node `refill_watermark:=K`** (default −1 = off) — with K ≥ 0 the env checks after every action pop: whenever ≤ K actions remain queued it also publishes the latest observation **without blocking**, so a re-plan is requested while earlier actions are still executing. (K=0 therefore behaves like −1 plus one stale request at the moment the queue drains.)
 
 Measured on the chunk-8 PNG sweep (same seeds 1000–1009 / 1000–1004; this session ran on a thermally throttled GPU — compare within the table, not against the published walls above):
 
@@ -110,11 +110,12 @@ Reading the numbers:
 - This regime is **inference-bound**: one denoising pass (1.6–2 s here) yields only 8 actions that the env consumes in milliseconds, so no watermark can hide the latency and every queued burst is stale by construction. Real-time chunking pays off when inference fits **inside** the control period (fast policies, fixed-rate control loops) — there, `async_inference` plus a small watermark is the right shape. A latest-wins mailbox (a fresh chunk supersedes the queued remainder instead of appending) is the natural next step and is not implemented yet.
 
 ```bash
-CHUNK=8 WATERMARK=4 bash scripts/16-rtc-async-bench.sh                  # async + proactive refill
-CHUNK=8 WATERMARK=-1 ASYNC=false bash scripts/16-rtc-async-bench.sh     # sync chunk-8 reference
+ASYNC=true WATERMARK=-1 CHUNK=8 bash scripts/09-bridge-run.sh 7         # one async episode
+CHUNK=8 WATERMARK=4 bash scripts/16-rtc-async-bench.sh                  # async + proactive refill (10 episodes)
+CHUNK=8 WATERMARK=-1 ASYNC=false bash scripts/16-rtc-async-bench.sh     # sync chunk-8 reference (10 episodes)
 ```
 
-Raw per-episode JSON: [`benchmarks/rtc_async_wm4/`](benchmarks/rtc_async_wm4/) (10 seeds) and [`benchmarks/rtc_async_wm0/`](benchmarks/rtc_async_wm0/) (5 seeds). The env stats JSON records `refill_watermark` for provenance.
+Raw per-episode JSON: [`benchmarks/rtc_async_wm4/`](benchmarks/rtc_async_wm4/) (10 seeds, proactive refill) and [`benchmarks/rtc_async_wm_dry/`](benchmarks/rtc_async_wm_dry/) (5 seeds, ask-when-dry). The env stats JSON records `refill_watermark` for provenance; the async flag itself is part of the run command, not the stats.
 
 ## Nodes & parameters
 
@@ -127,7 +128,7 @@ Raw per-episode JSON: [`benchmarks/rtc_async_wm4/`](benchmarks/rtc_async_wm4/) (
 
 QoS: reliable + volatile on both sides; observation depth 5, action depth **32** — the action history must be deep enough to hold a whole burst without dropping its tail.
 
-env_node parameters: `seed` (int), `video_path` (mp4 out), `stats_path` (JSON out), `image_codec` (`jpeg`|`png`), `refill_watermark` (int, default −1 = ask-when-dry; ≥0 = receding-horizon refill, see real-time mode).
+env_node parameters: `seed` (int), `video_path` (mp4 out), `stats_path` (JSON out), `image_codec` (`jpeg`|`png`; anything else fails fast with a `ValueError` before the episode starts), `refill_watermark` (int, default −1 = ask-when-dry; ≥0 = receding-horizon refill, see real-time mode; values below −1 clamp to −1).
 policy_node parameters: `model_path` (checkpoint dir), `action_chunk_size` (int, default 1), `async_inference` (bool, default false = synchronous request-reply).
 
 Adapting to another policy/env: point `model_path` at a 0.6-format checkpoint, and edit the observation preprocessing in `policy_node._infer_and_publish` to match your env's obs keys. Swap `gym.make` in env_node for your environment (or a real robot driver).
@@ -157,6 +158,8 @@ bash scripts/00-prepare-model.sh            # MODEL_REPO=lerobot/diffusion_pusht
 bash scripts/08-bridge-build.sh
 
 # 2. one episode (env + policy cold start, ~1-2 min on GPU)
+#    knobs: MODEL= CHUNK= CODEC= ASYNC= WATERMARK= BRIDGE_OUT= (each run
+#    overwrites the output directory — copy artifacts out to compare runs)
 bash scripts/09-bridge-run.sh 7             # seed
 
 # 3. benchmarks (10 episodes each)

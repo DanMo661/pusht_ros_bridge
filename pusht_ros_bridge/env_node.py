@@ -9,6 +9,7 @@ background thread spins rclpy to service callbacks.
 """
 
 import queue
+import signal
 import sys
 import threading
 import time
@@ -41,10 +42,11 @@ class PushTEnvNode(Node):
         self.declare_parameter('stats_path', '')
         self.declare_parameter('image_codec', 'jpeg')  # 'jpeg' (lossy) or 'png' (lossless)
         # -1 = legacy: ask the policy only when the action FIFO is completely
-        # dry. >=0 = receding-horizon refill: once the queue falls to this many
-        # pending actions, publish the latest observation WITHOUT blocking, so
-        # an async policy node re-plans on fresh state while the remaining
-        # queued actions execute.
+        # dry. >=0 = receding-horizon refill: EVERY step whose pop leaves at
+        # most this many actions queued also publishes the latest observation
+        # without blocking, so an async policy node keeps re-planning while
+        # queued actions execute. (0 therefore behaves like -1 plus one stale
+        # request at the moment the queue drains.)
         self.declare_parameter('refill_watermark', -1)
 
         self.obs_pub = self.create_publisher(PushtObservation, '/pusht/observation', 5)
@@ -85,7 +87,7 @@ class PushTEnvNode(Node):
                 pass
 
     # ── helpers ────────────────────────────────────────────────
-    def publish_obs(self, obs, stamp=None):
+    def publish_obs(self, obs):
         codec = self.get_parameter('image_codec').value
         ext = '.png' if codec == 'png' else '.jpg'
         encode_params = ([cv2.IMWRITE_JPEG_QUALITY, 90] if ext == '.jpg'
@@ -97,7 +99,7 @@ class PushTEnvNode(Node):
             self.get_logger().error(f'{codec} encode failed')
             return
         msg = PushtObservation()
-        msg.header.stamp = stamp if stamp is not None else self.get_clock().now().to_msg()
+        msg.header.stamp = self.get_clock().now().to_msg()
         img = CompressedImage()
         img.format = codec
         img.data = buf.tobytes()
@@ -211,12 +213,22 @@ def main(args=None):
     rclpy.init(args=args)
     node = PushTEnvNode()
 
-    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    def _spin_quiet():
+        try:
+            rclpy.spin(node)
+        except rclpy.executors.ExternalShutdownException:
+            pass  # shutdown noise on the daemon spin thread; main decides the exit
+
+    spin_thread = threading.Thread(target=_spin_quiet, daemon=True)
     spin_thread.start()
+
+    # SIGTERM (watchdog kill, timeout wrapper) exits through the same finally
+    # path as Ctrl-C instead of dying mid-publish with a dead-context traceback.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     try:
         result = node.run_episode()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         result = None
     finally:
         try:

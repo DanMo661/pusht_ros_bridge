@@ -1,6 +1,8 @@
 #!/bin/bash
 # ROS 桥 10 回合基准：seed 1000-1009，每回合 policy+env 冷启动
 set -e
+WS=${WS:-/root/ros2_ws}
+PY=${PY:-/root/lerobot-venv/bin/python}
 source /opt/ros/jazzy/setup.bash
 source "$WS/install/setup.bash"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
@@ -8,8 +10,6 @@ export SDL_VIDEODRIVER=dummy
 export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
-PY=/root/lerobot-venv/bin/python
-WS=${WS:-/root/ros2_ws}
 SRC="$WS/src/pusht_ros_bridge/pusht_ros_bridge"
 BENCH=/root/ros_bench
 rm -rf "$BENCH" && mkdir -p "$BENCH"

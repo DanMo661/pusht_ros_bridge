@@ -7,6 +7,7 @@
 # reproduces the synchronous 15-chunk-bench.sh run exactly.
 set -e
 WS=${WS:-/root/ros2_ws}
+PY=${PY:-/root/lerobot-venv/bin/python}
 source /opt/ros/jazzy/setup.bash
 source "$WS/install/setup.bash"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
@@ -14,14 +15,12 @@ export SDL_VIDEODRIVER=dummy
 export PYTHONPATH=/opt/ros/jazzy/lib/python3.12/site-packages:$PYTHONPATH
 export LD_LIBRARY_PATH=/opt/ros/jazzy/lib:$LD_LIBRARY_PATH
 
-PY=/root/lerobot-venv/bin/python
 SRC="$WS/src/pusht_ros_bridge/pusht_ros_bridge"
 BENCH=${BENCH:-/root/rtc_bench}
 CHUNK=${CHUNK:-8}
 WATERMARK=${WATERMARK:-4}
-ASYNC=${ASYNC:-true}
-TAG="CHUNK$CHUNK"
-[ "$ASYNC" = true ] && TAG="${TAG}+ASYNC wm$WATERMARK"
+ASYNC=$(echo "${ASYNC:-true}" | tr '[:upper:]' '[:lower:]')
+[ "$ASYNC" = true ] && TAG="CHUNK$CHUNK+ASYNC wm$WATERMARK" || TAG="CHUNK$CHUNK+SYNC wm$WATERMARK"
 rm -rf "$BENCH" && mkdir -p "$BENCH"
 
 for SEED in $(seq 1000 1009); do
